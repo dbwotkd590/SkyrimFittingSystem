@@ -1,0 +1,44 @@
+name: Build SFSCore.dll
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup xmake 3.1.0
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '3.1.0'
+          actions-cache-folder: '.xmake-cache'
+
+      - name: Configure
+        shell: pwsh
+        env:
+          SFS_BUILD_VERSION: '1.8.0'
+          SFS_BUILD_VERSION_STRING: '1.8.0-selfbuild'
+        run: xmake f -p windows -a x64 -m release --vs=2022 -y -v
+
+      - name: Build
+        shell: pwsh
+        env:
+          SFS_BUILD_VERSION: '1.8.0'
+          SFS_BUILD_VERSION_STRING: '1.8.0-selfbuild'
+        run: |
+          xmake build -y -v SkyrimFittingSystem
+          if ($LASTEXITCODE -ne 0) { xmake build -y -v -j 1 SkyrimFittingSystem }
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: SFSCore-1.8.0-selfbuild
+          path: build/v1.8.0/windows/x64/release/SFSCore.dll
+          if-no-files-found: error
