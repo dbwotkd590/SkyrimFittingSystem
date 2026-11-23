@@ -14,6 +14,84 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Apply morph re-attach patch
+        shell: pwsh
+        run: |
+          @'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "src/native/RaceMenuBodyMorph.cpp")
+          src = path.read_text(encoding="utf-8")
+
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"[patch] anchor '{label}' found {count} times (expected 1)")
+              return text.replace(old, new)
+
+
+          # 1) Forward declaration so OnAttach can request a morph pass.
+          src = replace_once(
+              src,
+              "void QueuePendingMorphSync(RE::FormID a_actorFormID,\n"
+              "                           std::uint32_t a_retries = 2,\n"
+              "                           bool a_nextFrame = false);\n",
+              "void QueuePendingMorphSync(RE::FormID a_actorFormID,\n"
+              "                           std::uint32_t a_retries = 2,\n"
+              "                           bool a_nextFrame = false);\n"
+              "void RecordMorphUpdateRequest(RE::FormID a_actorFormID);\n",
+              "forward-decl",
+          )
+
+          # 2) Native snapshot path: always run the reset/reapply pass (isAttaching=false).
+          #    With SHAPEDATA present, RaceMenu restores the original vertices before
+          #    applying, so this is idempotent and also undoes a doubled attach.
+          src = replace_once(
+              src,
+              "    if (a_applyInitialMorphs && !ContainsExtraData(node.get(), shapeDataName)) {\n",
+              "    if (a_applyInitialMorphs) {\n",
+              "snapshot-apply",
+          )
+
+          # 3) RaceMenu attach observer: RaceMenu's own OnAttach calls
+          #    ApplyVertexDiff(isAttaching=true), which does NOT restore SHAPEDATA first.
+          #    A retained, already-morphed node that is re-attached gets the delta twice.
+          #    Request a deferred reset/reapply pass for registered appearance nodes.
+          src = replace_once(
+              src,
+              "    // Never apply a second initial delta in OnAttach. Only an earlier live\n",
+              "    // SELFBUILD PATCH: force a deferred reset/reapply pass (isAttaching=false)\n"
+              "    // so a re-attached, already-morphed node is restored from SHAPEDATA.\n"
+              "    RecordMorphUpdateRequest(actor->GetFormID());\n"
+              "    logger::info(\"[selfbuild] OnAttach reset pass requested actor={:08X} armor={:08X} firstPerson={}\",\n"
+              "                 actor->GetFormID(), a_armor->GetFormID(), a_firstPerson);\n"
+              "    // Never apply a second initial delta in OnAttach. Only an earlier live\n",
+              "onattach-request",
+          )
+
+          # 4) Make the sync results visible in the normal (info) log for diagnosis.
+          src = replace_once(
+              src,
+              "  if (submittedCount != 0) {\n    logger::debug(\n",
+              "  if (submittedCount != 0) {\n    logger::info(\n",
+              "applied-log",
+          )
+          src = replace_once(
+              src,
+              "  if (remembered != 0) {\n    logger::debug(\n",
+              "  if (remembered != 0) {\n    logger::info(\n",
+              "remembered-log",
+          )
+
+          path.write_text(src, encoding="utf-8")
+          print("[patch] RaceMenuBodyMorph.cpp patched OK")
+          '@ | Set-Content -Encoding utf8 patch_sfs.py
+          python patch_sfs.py src/native/RaceMenuBodyMorph.cpp
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git diff --stat
+
       - name: Setup xmake 3.1.0
         uses: xmake-io/github-action-setup-xmake@v1
         with:
@@ -24,14 +102,14 @@ jobs:
         shell: pwsh
         env:
           SFS_BUILD_VERSION: '1.8.0'
-          SFS_BUILD_VERSION_STRING: '1.8.0-selfbuild'
+          SFS_BUILD_VERSION_STRING: '1.8.0-selfbuild-fix1'
         run: xmake f -p windows -a x64 -m release --vs=2022 -y -v
 
       - name: Build
         shell: pwsh
         env:
           SFS_BUILD_VERSION: '1.8.0'
-          SFS_BUILD_VERSION_STRING: '1.8.0-selfbuild'
+          SFS_BUILD_VERSION_STRING: '1.8.0-selfbuild-fix1'
         run: |
           xmake build -y -v SkyrimFittingSystem
           if ($LASTEXITCODE -ne 0) { xmake build -y -v -j 1 SkyrimFittingSystem }
@@ -39,6 +117,6 @@ jobs:
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
-          name: SFSCore-1.8.0-selfbuild
+          name: SFSCore-1.8.0-selfbuild-fix1
           path: build/v1.8.0/windows/x64/release/SFSCore.dll
           if-no-files-found: error
